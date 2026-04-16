@@ -1,0 +1,126 @@
+name: Deploy to Alibaba Cloud
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to Production Server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            set -e
+
+            # Set project directory with fallback
+            PROJECT_PATH="${{ secrets.SERVER_PROJECT_PATH }}"
+            # Trim whitespace
+            PROJECT_PATH=$(printf '%s' "${PROJECT_PATH}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+            # Expand relative paths starting with ~ or if empty, use default
+            if [ -z "${PROJECT_PATH}" ] || [ "${PROJECT_PATH}" = "null" ]; then
+              PROJECT_PATH="$HOME/prototype-game-platform-admin-panel"
+            elif [[ "${PROJECT_PATH}" =~ ^~ ]]; then
+              PROJECT_PATH="${PROJECT_PATH/#\~/$HOME}"
+            fi
+
+            echo "Using project path: $PROJECT_PATH"
+
+            # Navigate to project directory
+            if [ ! -d "$PROJECT_PATH" ]; then
+              echo "Error: Directory $PROJECT_PATH does not exist!"
+              echo "Please ensure the SERVER_PROJECT_PATH secret is set correctly or the directory exists."
+              exit 1
+            fi
+
+            # Convert to absolute path if relative (after checking it exists)
+            if [[ ! "${PROJECT_PATH}" =~ ^/ ]]; then
+              PROJECT_PATH="$(cd "${PROJECT_PATH}" && pwd)"
+            fi
+
+            cd "$PROJECT_PATH" || {
+              echo "Error: Cannot change to directory $PROJECT_PATH"
+              exit 1
+            }
+
+            # Check if git repository exists, if not clone it
+            if [ ! -d ".git" ]; then
+              echo "Git repository not found. Please ensure the repository is cloned to $PROJECT_PATH"
+              echo "If you need to clone it, run: git clone <repository-url> $PROJECT_PATH"
+              exit 1
+            fi
+
+            # Pull latest changes
+            echo "Pulling latest changes from git..."
+            git fetch origin
+            git reset --hard origin/${{ github.ref_name }}
+            git clean -fd
+
+            # Stop and remove existing containers
+            echo "Stopping and removing existing containers..."
+            docker compose down || docker-compose down || true
+
+            # Remove old images (optional, comment out if you want to keep them)
+            # docker image prune -f
+
+            # Build and start containers
+            echo "Building and starting containers..."
+            docker compose up --build -d || docker-compose up --build -d
+
+            # Show container status
+            echo "Container status:"
+            docker compose ps || docker-compose ps
+
+            # Show logs (last 20 lines)
+            echo "Recent logs:"
+            docker compose logs --tail=20 || docker-compose logs --tail=20
+
+      - name: Health check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            # Set project directory with fallback
+            PROJECT_PATH="${{ secrets.SERVER_PROJECT_PATH }}"
+            # Trim whitespace
+            PROJECT_PATH=$(printf '%s' "${PROJECT_PATH}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+            # Expand relative paths starting with ~ or if empty, use default
+            if [ -z "${PROJECT_PATH}" ] || [ "${PROJECT_PATH}" = "null" ]; then
+              PROJECT_PATH="$HOME/prototype-game-platform-admin-panel"
+            elif [[ "${PROJECT_PATH}" =~ ^~ ]]; then
+              PROJECT_PATH="${PROJECT_PATH/#\~/$HOME}"
+            fi
+
+            # Convert to absolute path if relative
+            if [[ ! "${PROJECT_PATH}" =~ ^/ ]]; then
+              PROJECT_PATH="$(cd "${PROJECT_PATH}" && pwd)"
+            fi
+
+            cd "$PROJECT_PATH" || {
+              echo "Error: Cannot change to directory $PROJECT_PATH"
+              exit 1
+            }
+            echo "Waiting for container to be healthy..."
+            sleep 10
+            docker compose ps || docker-compose ps
+            echo "Health check completed"
